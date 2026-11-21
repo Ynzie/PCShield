@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PC Shield</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800;900&family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+<link rel="icon" id="favicon" href="icons/kara.png">
+</head>
+<body>
+<div id="top">
+  <h1>
+    <svg width="30" height="30" viewBox="0 0 24 24" fill="none"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--green)"/><stop offset="1" style="stop-color:var(--purple)"/></linearGradient></defs><path d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5l8-3z" stroke="url(#lg)" stroke-width="2" stroke-linejoin="round"/><path d="M8.5 12l2.5 2.5 4.5-5" stroke="url(#lg)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span><span class="t">PC </span><span class="acc">SHIELD</span><small id="sub"></small></span>
+  </h1>
+  <span id="topScan"></span>
+  <span id="topVpn" class="chip" style="cursor:pointer" title="Toggle VPN"><span class="dot"></span>VPN</span>
+  <span id="topAdmin" class="chip"></span>
+  <span id="topSettings" class="chip" style="cursor:pointer" title="Settings">⚙ Settings</span>
+</div>
+<div class="tabs" id="tabs"></div>
+<main id="main"></main>
+<div id="modal"><div class="box" id="modalBox"></div></div>
+<div id="toasts"></div>
+<script src="mock.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Build output (build.bat / PyInstaller)
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs / local stuff
+*.log
+*.log.old
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
