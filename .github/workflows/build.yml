@@ -16,8 +16,8 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install psutil
@@ -28,8 +28,8 @@ jobs:
     needs: tests
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         id: py
         with:
           python-version: "3.12"
@@ -46,13 +46,13 @@ jobs:
           if (Test-Path $out) { Get-Content $out }
           if ($p.ExitCode -ne 0) { throw "self-test failed (exit $($p.ExitCode))" }
           "{0:N1} MB" -f ((Get-Item dist\PCShield.exe).Length / 1MB)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: PCShield
           path: dist/PCShield.exe
       - name: Publish release (version tags only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/PCShield.exe
           generate_release_notes: true

@@ -1,5 +1,7 @@
 # PC Shield
 
+[![Build](https://github.com/Ynzie/PCShield/actions/workflows/build.yml/badge.svg)](https://github.com/Ynzie/PCShield/actions/workflows/build.yml)
+
 Free, Malwarebytes-style security and cleanup app for Windows. It uses **Microsoft Defender** (built into
 Windows) as the scanning engine and adds what Defender doesn't show you: unwanted programs, tampered
 Windows settings, sketchy startup items, bloatware, privacy switches, breach checks, a file shredder and a
@@ -9,7 +11,7 @@ Windows 10/11 only. Built for a few friends' PCs - expect rough edges on hardwar
 
 ## Download
 
-Grab `PCShield.exe` from [Releases](../../releases) and put it in a folder it can stay in (shortcuts, startup
+Grab `PCShield.exe` from the [latest release](https://github.com/Ynzie/PCShield/releases/latest) and put it in a folder it can stay in (shortcuts, startup
 and scheduled scans point to where it lives). No install, no Python needed. It asks for admin when it opens.
 
 - Windows SmartScreen may warn because the exe isn't code-signed: **More info → Run anyway**.

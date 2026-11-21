@@ -131,7 +131,7 @@ def _shred_file(path, passes):
         return
     if os.stat(path).st_nlink > 1:  # hard link: overwriting would destroy the other name's data too
         raise OSError(0, "has other hard links - skipped so the other copy isn't destroyed")
-    os.chmod(path, stat.S_IWRITE)
+    os.chmod(path, stat.S_IREAD | stat.S_IWRITE)  # clears read-only on Windows; keeps it readable elsewhere
     size = os.path.getsize(path)
     with open(path, "r+b", buffering=0) as f:
         for i in range(passes):
