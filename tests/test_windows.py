@@ -75,14 +75,26 @@ def planted_junction_is_moved_aside_not_followed():
     shutil.rmtree(util.DATA_DIR, ignore_errors=True)
     target = tempfile.mkdtemp()
     open(os.path.join(target, "victim.txt"), "w").write("keep")
+    sddl = lambda: ps(f"(Get-Acl -LiteralPath '{target}').Sddl")
+    before = sddl()
     subprocess.run(["cmd", "/c", "mklink", "/J", util.DATA_DIR, target], capture_output=True, check=True)
     assert install._is_link(util.DATA_DIR)
     assert install.secure_data_dir()
     assert not install._is_link(util.DATA_DIR) and install.acl_locked(util.DATA_DIR)
     assert open(os.path.join(target, "victim.txt")).read() == "keep"
-    acl_before = ps(f"(Get-Acl -LiteralPath '{target}').AreAccessRulesProtected")
-    assert acl_before == "False", "the junction target's permissions were changed"
+    assert sddl() == before, "the junction target's permissions were changed"
     shutil.rmtree(target, ignore_errors=True)
+
+
+@test
+def native_acl_check_matches_powershell_and_is_fast():
+    for p in (util.DATA_DIR, util.VPN_DIR, util.PROGRAM_DATA, util.WINDOWS_DIR, tempfile.gettempdir()):
+        t = time.time()
+        native = install._acl_locked_native(p)
+        took = time.time() - t
+        assert native == install._acl_locked_ps(p), p
+        assert took < 0.2, f"{p}: {took:.2f}s"
+    assert install._acl_locked_native(util.DATA_DIR) and not install._acl_locked_native(util.PROGRAM_DATA)
 
 
 @test

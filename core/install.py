@@ -149,6 +149,78 @@ def _is_link(path):
 
 def acl_locked(path):
     """True when only Administrators/SYSTEM can change the folder (owner too) and nothing is inherited."""
+    if os.name == "nt":
+        try:
+            return _acl_locked_native(path)
+        except Exception as e:  # noqa
+            log(f"native ACL check failed ({e}) - using PowerShell")
+    return _acl_locked_ps(path)
+
+
+ADMIN_SIDS = ("S-1-5-32-544", "S-1-5-18")
+
+
+def _acl_locked_native(path):
+    """Same check as _acl_locked_ps through the Windows security API (milliseconds instead of seconds)."""
+    import ctypes
+    from ctypes import byref, c_void_p, wintypes as w
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32")
+    k32.LocalFree.argtypes = [c_void_p]
+    adv.GetNamedSecurityInfoW.argtypes = [w.LPCWSTR, ctypes.c_int, w.DWORD, ctypes.POINTER(c_void_p),
+                                          ctypes.POINTER(c_void_p), ctypes.POINTER(c_void_p),
+                                          ctypes.POINTER(c_void_p), ctypes.POINTER(c_void_p)]
+    adv.GetNamedSecurityInfoW.restype = w.DWORD
+    adv.ConvertSidToStringSidW.argtypes = [c_void_p, ctypes.POINTER(w.LPWSTR)]
+    adv.GetSecurityDescriptorControl.argtypes = [c_void_p, ctypes.POINTER(w.WORD), ctypes.POINTER(w.DWORD)]
+    adv.GetAclInformation.argtypes = [c_void_p, c_void_p, w.DWORD, ctypes.c_int]
+    adv.GetAce.argtypes = [c_void_p, w.DWORD, ctypes.POINTER(c_void_p)]
+
+    class AclSize(ctypes.Structure):
+        _fields_ = [("AceCount", w.DWORD), ("AclBytesInUse", w.DWORD), ("AclBytesFree", w.DWORD)]
+
+    def sid_str(p):
+        s = w.LPWSTR()
+        if not adv.ConvertSidToStringSidW(p, byref(s)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return s.value
+        finally:
+            k32.LocalFree(ctypes.cast(s, c_void_p))
+
+    owner, dacl, sd = c_void_p(), c_void_p(), c_void_p()
+    rc = adv.GetNamedSecurityInfoW(path, 1, 0x1 | 0x4, byref(owner), None, byref(dacl), None, byref(sd))  # owner+DACL
+    if rc:
+        raise OSError(rc, "GetNamedSecurityInfo failed")
+    try:
+        control, rev = w.WORD(), w.DWORD()
+        if not adv.GetSecurityDescriptorControl(sd, byref(control), byref(rev)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not control.value & 0x1000 or not dacl.value:  # SE_DACL_PROTECTED; a NULL DACL lets everyone in
+            return False
+        if sid_str(owner) not in ADMIN_SIDS:
+            return False
+        info = AclSize()
+        if not adv.GetAclInformation(dacl, byref(info), ctypes.sizeof(info), 2):  # AclSizeInformation
+            raise ctypes.WinError(ctypes.get_last_error())
+        for i in range(info.AceCount):
+            ace = c_void_p()
+            if not adv.GetAce(dacl, i, byref(ace)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            kind = ctypes.c_ubyte.from_address(ace.value).value
+            if kind in (1, 2, 3, 6, 10, 12, 13, 17):  # deny / audit / alarm / label entries don't grant anything
+                continue
+            if kind not in (0, 9):  # object-type allow entries: don't guess, treat as unlocked
+                return False
+            mask = w.DWORD.from_address(ace.value + 4).value
+            if mask & WRITE_MASK and sid_str(ace.value + 8) not in ADMIN_SIDS:
+                return False
+        return True
+    finally:
+        k32.LocalFree(sd)
+
+
+def _acl_locked_ps(path):
     out = ps_out(
         f"$a=Get-Acl -LiteralPath {ps_quote(path)}; $sid=[Security.Principal.SecurityIdentifier]; "
         f"$o=$a.GetOwner($sid).Value; $ok=($o -in 'S-1-5-32-544','S-1-5-18') -and $a.AreAccessRulesProtected; "
