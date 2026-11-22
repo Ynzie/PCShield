@@ -25,7 +25,7 @@ def check_email(email):
     email = email.strip()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         return {"ok": False, "message": "That doesn't look like an email address."}
-    q = urllib.parse.quote(email)
+    q = urllib.parse.quote(email, safe="")
     try:
         code, body = _get(f"https://api.xposedornot.com/v1/breach-analytics?email={q}")
     except (urllib.error.URLError, TimeoutError) as e:

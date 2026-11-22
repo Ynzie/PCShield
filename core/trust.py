@@ -46,8 +46,13 @@ def reset():
 def is_trusted(signer, status):
     if status != "Valid" or not signer:
         return False
-    s = signer.lower()
-    return any(s.startswith(p.lower()) for p in trusted_list())
+    s = signer.strip().lower()
+    for p in trusted_list():
+        p = p.strip().lower()
+        # whole words only: "Intel" must not trust "Intelligent Tools Ltd", nor "Valve" trust "Valveworks"
+        if p and s.startswith(p) and (len(s) == len(p) or not s[len(p)].isalnum()):
+            return True
+    return False
 
 
 def _files_for(value, kind):

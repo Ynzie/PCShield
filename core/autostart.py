@@ -5,17 +5,14 @@ no UAC prompt, delayed 30 s so it doesn't slow boot, starts in the system tray."
 import os
 import sys
 
+from . import install
 from .util import ps, ps_out, ps_quote
 
 TASK = "PC Shield"
 
 
 def _command():
-    if getattr(sys, "frozen", False):
-        return sys.executable, "--startup"
-    script = os.path.abspath(sys.modules["__main__"].__file__)
-    pyw = sys.executable.replace("python.exe", "pythonw.exe")
-    return pyw, f'"{script}" --startup'
+    return install.task_target("--startup")
 
 
 def status():
@@ -30,9 +27,10 @@ def set_enabled(enabled):
     if not enabled:
         ps(f"Unregister-ScheduledTask -TaskName {ps_quote(TASK)} -Confirm:$false -ErrorAction SilentlyContinue")
         return {"ok": True, "enabled": False}
+    install.ensure_installed()  # the task runs the Program Files copy, which only admins can replace
     exe, args = _command()
     script = (
-        f"$u=\"$env:USERDOMAIN\\$env:USERNAME\"; "
+        f"$u=[Security.Principal.WindowsIdentity]::GetCurrent().Name; "
         f"$a=New-ScheduledTaskAction -Execute {ps_quote(exe)} -Argument {ps_quote(args)}; "
         f"$t=New-ScheduledTaskTrigger -AtLogOn -User $u; $t.Delay='PT30S'; "
         f"$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest; "

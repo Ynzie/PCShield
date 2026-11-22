@@ -13,8 +13,8 @@ import threading
 import time
 import uuid
 
-from . import system, trust
-from .util import (REPORT_DIR, DATA_DIR, ps, ps_json, ps_out, ps_quote, reg_get, reg_set, reg_delete,
+from . import install, system, trust
+from .util import (PROGRAM_DATA, PROGRAM_FILES, SYSTEM32, REPORT_DIR, DATA_DIR, ps, ps_json, ps_out, ps_quote, reg_get, reg_set, reg_delete,
                    load_settings, save_setting, now_iso, run)
 
 THREAT_STATUS = {0: "Unknown", 1: "Detected", 2: "Cleaned", 3: "Quarantined", 4: "Removed", 5: "Allowed",
@@ -28,8 +28,8 @@ POLICIES_EXP = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
 DEF_POL = r"SOFTWARE\Policies\Microsoft\Windows Defender"
 WINLOGON = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 IFEO = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
-HOSTS = os.path.expandvars(r"%SystemRoot%\System32\drivers\etc\hosts")
-USERINIT = os.path.expandvars(r"%SystemRoot%\system32\userinit.exe")
+HOSTS = os.path.join(SYSTEM32, "drivers", "etc", "hosts")
+USERINIT = os.path.join(SYSTEM32, "userinit.exe")
 
 # (hive, path, value, bad_value or callable, name, fix ('delete'|('set', value)))
 PUM_RULES = [
@@ -610,9 +610,16 @@ def _quarantine_threat(det):
 
 
 def _mpcmdrun():
-    return ps_out("$p=Get-ChildItem \"$env:ProgramData\\Microsoft\\Windows Defender\\Platform\" -Directory -ErrorAction SilentlyContinue | "
-                  "Sort-Object Name -Descending | Select-Object -First 1; if ($p) { Join-Path $p.FullName 'MpCmdRun.exe' } "
-                  "else { \"$env:ProgramFiles\\Windows Defender\\MpCmdRun.exe\" }")
+    """Defender's command-line tool, from the real folders (not %ProgramData%, which a program could redirect)."""
+    plat = os.path.join(PROGRAM_DATA, "Microsoft", "Windows Defender", "Platform")
+    try:
+        vers = [d for d in os.listdir(plat) if os.path.isfile(os.path.join(plat, d, "MpCmdRun.exe"))]
+    except OSError:
+        vers = []
+    if vers:
+        best = max(vers, key=lambda v: tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.-]", v)))
+        return os.path.join(plat, best, "MpCmdRun.exe")
+    return os.path.join(PROGRAM_FILES, "Windows Defender", "MpCmdRun.exe")
 
 
 def _restore_threat(det):
@@ -762,10 +769,7 @@ DAYS = {"MON": "Monday", "TUE": "Tuesday", "WED": "Wednesday", "THU": "Thursday"
 
 
 def _scan_command(kind):
-    if getattr(sys, "frozen", False):
-        return sys.executable, f"--scan {kind}"
-    script = os.path.abspath(sys.modules["__main__"].__file__)
-    return sys.executable.replace("python.exe", "pythonw.exe"), f'"{script}" --scan {kind}'
+    return install.task_target(f"--scan {kind}")
 
 
 def set_schedule(kind, enabled, freq="weekly", day="SUN", time_="03:00"):
@@ -778,11 +782,12 @@ def set_schedule(kind, enabled, freq="weekly", day="SUN", time_="03:00"):
     if not re.fullmatch(r"\d{1,2}:\d{2}", str(time_ or "")):
         return {"ok": False, "message": "Pick a time."}
     day = DAYS.get(str(day).upper(), "Sunday")
+    install.ensure_installed()
     exe, args = _scan_command(kind)
     trig = (f"New-ScheduledTaskTrigger -Daily -At {ps_quote(time_)}" if freq == "daily"
             else f"New-ScheduledTaskTrigger -Weekly -DaysOfWeek {day} -At {ps_quote(time_)}")
     out, err, code = ps(
-        f"$u=\"$env:USERDOMAIN\\$env:USERNAME\"; "
+        f"$u=[Security.Principal.WindowsIdentity]::GetCurrent().Name; "
         f"$a=New-ScheduledTaskAction -Execute {ps_quote(exe)} -Argument {ps_quote(args)}; $t={trig}; "
         f"$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest; "
         f"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable "

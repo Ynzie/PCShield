@@ -190,7 +190,7 @@ def _worker(paths, passes, trim):
     if trim:
         letters = {os.path.splitdrive(os.path.abspath(p))[0].rstrip(":") for p in paths}
         for L in letters:
-            if L and drive_media(f"{L}:\\").upper() == "SSD":
+            if len(L) == 1 and L.isalpha() and drive_media(f"{L}:\\").upper() == "SSD":  # not network/UNC paths
                 with _lock:
                     STATE["current"] = f"Sending TRIM to {L}: so the SSD erases freed blocks"
                 ps(f"Optimize-Volume -DriveLetter {L} -ReTrim", timeout=900)

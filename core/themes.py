@@ -5,7 +5,8 @@ import os
 import shutil
 import sys
 
-from .util import DATA_DIR, ps, ps_out, ps_quote, load_settings, save_setting
+from . import install
+from .util import DATA_DIR, ps, ps_out, ps_quote, load_settings, save_setting, sys_exe
 
 THEMES = {
     "kara": "Kara - Purple",
@@ -24,7 +25,7 @@ def _resource(*p):
 
 
 def icon_path(theme):
-    """Copy of the theme's .ico in LocalAppData (a stable path shortcuts can point at)."""
+    """Copy of the theme's .ico in the data folder (a stable path shortcuts can point at)."""
     os.makedirs(ICON_DIR, exist_ok=True)
     dst = os.path.join(ICON_DIR, f"{theme}.ico")
     src = _resource("icons", f"{theme}.ico")
@@ -39,10 +40,7 @@ def current():
 
 
 def _target():
-    if getattr(sys, "frozen", False):
-        return sys.executable, ""
-    script = os.path.abspath(sys.modules["__main__"].__file__)
-    return sys.executable.replace("python.exe", "pythonw.exe"), f'"{script}"'
+    return install.task_target("")
 
 
 def _shortcut_paths():
@@ -65,9 +63,10 @@ LAUNCHER = "PC Shield Launcher"
 def register_launcher():
     """On-demand task with highest privileges. Shortcuts run this task, so PC Shield opens
     elevated without a UAC prompt. The task's command is fixed (no arguments can be passed in)."""
+    install.ensure_installed()  # only admins can replace what this no-prompt task starts
     exe, args = _target()
     script = (
-        f"$u=\"$env:USERDOMAIN\\$env:USERNAME\"; "
+        f"$u=[Security.Principal.WindowsIdentity]::GetCurrent().Name; "
         f"$a=New-ScheduledTaskAction -Execute {ps_quote(exe)}" + (f" -Argument {ps_quote(args)}" if args else "") + "; "
         f"$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Highest; "
         f"$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
@@ -86,7 +85,7 @@ def launcher_path():
 def _write_shortcut(lnk, theme):
     exe, _ = _target()
     run_args = '/run /tn "' + LAUNCHER + '"'
-    schtasks = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe")
+    schtasks = sys_exe("schtasks")
     ps(f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({ps_quote(lnk)}); "
        f"$s.TargetPath={ps_quote(schtasks)}; $s.Arguments={ps_quote(run_args)}; "
        f"$s.WindowStyle=7; $s.WorkingDirectory={ps_quote(os.path.dirname(exe))}; "

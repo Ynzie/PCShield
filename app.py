@@ -11,14 +11,51 @@ import functools
 import os
 import sys
 import threading
+import time
 import traceback
 import webbrowser
 
-from core import autostart, themes, trust, identity, privacy, scanner, shredder, system, vpn
-from core.util import ps, load_settings, save_setting, log, LOG_FILE
+from core import autostart, install, themes, trust, identity, privacy, scanner, shredder, system, updater, vpn
+from core.util import ps, load_settings, save_setting, log, LOG_FILE, WINDOWS_DIR
+from core.version import VERSION
 
 APP_NAME = "PC Shield"
-VERSION = "1.2.0"
+
+
+def open_unelevated(target):
+    """Open a link in the user's normal (non-admin) browser. Starting it from this admin process would
+    run the browser as admin too; handing it to explorer.exe opens it with the user's own rights."""
+    try:
+        import subprocess
+        subprocess.Popen([os.path.join(WINDOWS_DIR, "explorer.exe"), target])
+    except OSError:
+        webbrowser.open(target)
+
+
+def restart_after_update(exe):
+    """Start the new version (it waits for this one to close), then quit."""
+    import subprocess
+    try:
+        subprocess.Popen([exe, "--after-update"], creationflags=0x00000008 | 0x00000200, close_fds=True)  # detached
+    except OSError as e:
+        log(f"restart after update: {e}")
+    t = threading.Timer(1.0, TRAY.quit)
+    t.daemon = True
+    t.start()
+
+
+def background_update_check():
+    """Once a day (if on in Settings): look for a new release and mention it once per version in the tray."""
+    try:
+        if not updater.due():
+            return
+        r = updater.check()
+        if r.get("available") and load_settings().get("update_notified") != r.get("latest"):
+            save_setting("update_notified", r.get("latest"))
+            if TRAY.icon:
+                TRAY.icon.notify(f"PC Shield {r['latest']} is available. Open Settings to update.", "PC Shield")
+    except Exception as e:  # noqa
+        log(f"update check: {e}")
 
 
 def is_admin():
@@ -51,6 +88,27 @@ class Api:
     def __init__(self):
         self._window = None
 
+    # ---------------------------------------------------------- updates
+    @safe
+    def update_status(self):
+        return {**updater.cached(), "install": install.installed_info()}
+
+    @safe
+    def check_updates(self):
+        return {**updater.check(force=True), "auto": updater.auto_enabled(), "install": install.installed_info()}
+
+    @safe
+    def set_update_auto(self, on):
+        return updater.set_auto(on)
+
+    @safe
+    def install_update(self):
+        return updater.start_install(on_done=restart_after_update)
+
+    @safe
+    def update_state(self):
+        return updater.state()
+
     # ---------------------------------------------------------- general
     @safe
     def info(self):
@@ -60,12 +118,9 @@ class Api:
     @safe
     def open_url(self, url):
         url = str(url or "")
-        if url.startswith("https://"):
-            webbrowser.open(url)
-        elif url.startswith(("ms-settings:", "windowsdefender:")):
-            os.startfile(url)
-        else:
+        if not url.startswith(("https://", "ms-settings:", "windowsdefender:")) or any(c in url for c in '"\r\n'):
             return {"ok": False, "message": "Blocked an unexpected link."}
+        open_unelevated(url)
         return {"ok": True}
 
     def _dialog(self, kind, multiple=False, types=()):
@@ -450,16 +505,24 @@ class Tray:
 TRAY = Tray()
 
 
-def bring_existing_to_front():
-    """Single instance: if PC Shield is already open, show that window instead of opening a second copy."""
+def bring_existing_to_front(wait=0):
+    """Single instance: if PC Shield is already open, show that window instead of opening a second copy.
+    wait: seconds to wait for the other copy to close first (used right after an update)."""
     global _MUTEX
     try:
         k32 = ctypes.WinDLL("kernel32", use_last_error=True)
         k32.CreateMutexW.restype = ctypes.c_void_p
         k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-        _MUTEX = k32.CreateMutexW(None, False, "Local\\PCShieldApp")
-        if ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
-            return False
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        end = time.time() + wait
+        while True:
+            _MUTEX = k32.CreateMutexW(None, False, "Local\\PCShieldApp")
+            if ctypes.get_last_error() != 183:  # ERROR_ALREADY_EXISTS
+                return False
+            if time.time() >= end:
+                break
+            k32.CloseHandle(_MUTEX)
+            time.sleep(0.5)
         hwnd = themes.find_app_window(APP_NAME)
         if hwnd:
             themes.bring_to_front(hwnd)
@@ -477,6 +540,21 @@ def relaunch_as_admin():
         sys.exit(0)
 
 
+def prepare_data():
+    """Before anything reads reports/settings: make the data folder admin-only, bring over 1.2's data,
+    and put Defender back if a scan was interrupted."""
+    if is_admin():
+        try:
+            install.secure_data_dir()  # admin-only data folder (reports/settings/VPN configs we act on)
+            install.migrate_old_data()
+        except Exception:
+            log(f"securing the data folder failed\n{traceback.format_exc()}")
+    try:
+        scanner.recover_defender_actions()
+    except Exception:
+        pass
+
+
 def selftest(out_path):
     """Used by the GitHub build: prove the packaged exe can load everything it needs, then exit."""
     import json
@@ -488,6 +566,7 @@ def selftest(out_path):
             result["ok"] = False
             result["errors"].append(f"import {mod}: {e}")
     for rel in (("web", "index.html"), ("web", "app.js"), ("web", "app.css"), ("web", "icons", "kara.png"),
+                ("web", "fonts", "inter-latin-400-normal.woff2"), ("web", "fonts", "orbitron-latin-900-normal.woff2"),
                 ("icons", "kara.ico")):
         if not os.path.isfile(resource(*rel)):
             result["ok"] = False
@@ -501,11 +580,8 @@ def main():
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
         selftest(sys.argv[i + 1] if i + 1 < len(sys.argv) else os.path.join(os.environ.get("TEMP", "."), "pcshield-selftest.json"))
-    try:
-        scanner.recover_defender_actions()
-    except Exception:
-        pass
     if "--scan" in sys.argv:
+        prepare_data()
         i = sys.argv.index("--scan")
         try:
             scanner.headless_scan(sys.argv[i + 1] if i + 1 < len(sys.argv) else "quick")
@@ -514,8 +590,10 @@ def main():
         return
     if not is_admin():
         relaunch_as_admin()  # exits if the elevated copy started
-    if bring_existing_to_front():
-        return  # already open - just show it
+    if bring_existing_to_front(wait=20 if "--after-update" in sys.argv else 0):
+        return  # already open - just show it (and leave its data alone)
+    prepare_data()
+    threading.Thread(target=install.startup_maintenance, daemon=True).start()
     import webview
     api = Api()
     background = "--startup" in sys.argv  # started with Windows: live in the tray until opened
@@ -537,7 +615,12 @@ def main():
     win.events.shown += _on_shown
     win.events.closing += TRAY.on_closing
     try:
-        webview.start(lambda: TRAY.start(win), gui="edgechromium", debug="--debug" in sys.argv)
+        def _started():
+            TRAY.start(win)
+            t = threading.Timer(20, background_update_check)  # after start-up has settled
+            t.daemon = True
+            t.start()
+        webview.start(_started, gui="edgechromium", debug="--debug" in sys.argv)
     except Exception:
         log(f"window failed to start (is the WebView2 runtime installed?)\n{traceback.format_exc()}")
         ctypes.windll.user32.MessageBoxW(None, "PC Shield couldn't open its window.\n\nInstall the Microsoft Edge "

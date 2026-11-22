@@ -6,22 +6,22 @@ VPN control. A VPN needs a server, so this drives two free, real options:
 import json
 import os
 import re
-import shutil
 import time
 import urllib.request
 
 import psutil
 
-from .util import VPN_DIR, ps_json, run, load_settings, save_setting
+from .util import PROGRAM_FILES, VPN_DIR, ps_json, run, load_settings, save_setting
 
-WG_EXE_CANDIDATES = [os.path.expandvars(r"%ProgramFiles%\WireGuard\wireguard.exe")]
+# Only the real install location: a PATH lookup or %ProgramFiles% could be pointed at a fake wireguard.exe
+WG_EXE_CANDIDATES = [os.path.join(PROGRAM_FILES, "WireGuard", "wireguard.exe")]
 
 
 def wireguard_exe():
     for p in WG_EXE_CANDIDATES:
         if os.path.isfile(p):
             return p
-    return shutil.which("wireguard")
+    return None
 
 
 def _service_running(name):
@@ -76,11 +76,15 @@ def import_config(path):
         text = f.read()
     if "[Interface]" not in text or "[Peer]" not in text:
         return {"ok": False, "message": "That isn't a WireGuard .conf file."}
+    # Pre/PostUp/Down run commands as SYSTEM if WireGuard's script setting is ever turned on - a VPN config
+    # from the internet never needs them, so drop them
+    text = "\n".join(l for l in text.splitlines()
+                     if l.split("=")[0].strip().lower() not in ("preup", "postup", "predown", "postdown"))
     dest = os.path.join(VPN_DIR, name + ".conf")
     with open(dest, "w", encoding="utf-8") as f:
         f.write(text)
-    run(["icacls", dest, "/inheritance:r", "/grant:r", "SYSTEM:F", "/grant:r", "Administrators:F",
-         "/grant:r", f"{os.environ.get('USERNAME', '')}:F"])
+    # private key inside: SYSTEM (the tunnel service) and admins only, by SID so it works in any language
+    run(["icacls", dest, "/inheritance:r", "/grant:r", "*S-1-5-18:F", "/grant:r", "*S-1-5-32-544:F"])
     if not load_settings().get("vpn_default"):
         save_setting("vpn_default", name)
     return {"ok": True, "name": name}
@@ -145,6 +149,21 @@ def disconnect(name=None):
     else:
         code, out = run(["rasdial", name, "/disconnect"], timeout=60)
     return {"ok": code == 0, "message": out.strip()}
+
+
+def repoint_services():
+    """After moving configs (1.2 -> 1.3): reinstall running tunnels so their service reads the new path."""
+    exe = wireguard_exe()
+    if not exe:
+        return []
+    done = []
+    for t in wg_tunnels():
+        if t["connected"]:
+            run([exe, "/uninstalltunnelservice", t["name"]], timeout=60)
+            code, _ = run([exe, "/installtunnelservice", os.path.join(VPN_DIR, t["name"] + ".conf")], timeout=60)
+            if code == 0:
+                done.append(t["name"])
+    return done
 
 
 def toggle():

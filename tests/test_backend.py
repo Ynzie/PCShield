@@ -23,7 +23,7 @@ RUN_RULES = []
 
 
 def fake_run(args, **kw):
-    if isinstance(args, list) and args and args[0] == "powershell":
+    if isinstance(args, list) and args and str(args[0]).lower().replace("\\", "/").endswith(("powershell", "/powershell.exe")):
         cmd = args[-1]
         out, err, code = fakewin.fake_ps(cmd, kw.get("timeout"))
         return subprocess.CompletedProcess(args, code, out, err)
@@ -38,7 +38,7 @@ def fake_run(args, **kw):
 
 util.subprocess.run = fake_run
 
-from core import system, scanner, privacy, trust, shredder, vpn, identity, themes, autostart  # noqa: E402
+from core import system, scanner, privacy, trust, shredder, vpn, identity, themes, autostart, install, updater  # noqa: E402
 
 RESULTS = []
 import ntpath, types  # noqa: E401,E402
@@ -621,6 +621,289 @@ def json_serializable_api_payloads():
     json.dumps(scanner.scan_state()); json.dumps(privacy.get_toggles()); json.dumps(trust.trusted_list())
     json.dumps(themes.THEMES); json.dumps(vpn.status())
 
+
+
+# ---------------------------------------------------------------- 1.3: security + updates
+@test
+def machine_wide_uninstall_uses_full_cmd_path_not_shell():
+    hk = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Bloat1"
+    reg_put("HKLM", hk, "DisplayName", "Bloat One", 1)
+    reg_put("HKLM", hk, "UninstallString", '"C:\\Program Files\\Bloat\\unins000.exe" /SILENT', 1)
+    seen = {}
+
+    class P:
+        def __init__(self, cmd, **kw):
+            seen["cmd"], seen["kw"] = cmd, kw
+
+        def wait(self, timeout=None):
+            return 0
+    real = system.subprocess.Popen
+    system.subprocess.Popen = P
+    try:
+        system.uninstall("win32", "Bloat1")
+    finally:
+        system.subprocess.Popen = real
+    assert "shell" not in seen["kw"], seen["kw"]
+    assert seen["cmd"].startswith('"' + util.sys_exe("cmd") + '" /d /s /c '), seen["cmd"]
+
+
+@test
+def per_user_uninstaller_runs_without_admin():
+    hk = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\WaveBrowser"
+    reg_put("HKCU", hk, "DisplayName", "Wave Browser", 1)
+    reg_put("HKCU", hk, "UninstallString", '"C:\\Users\\ynzer\\AppData\\Local\\Wave\\uninstall.exe" --force', 1)
+    prog = next(p for p in system.installed_programs() if p["name"] == "Wave Browser")
+    assert prog["per_user"] and prog["id"] == "HKCU\\WaveBrowser", prog
+    PS_RULES.append(("Register-ScheduledTask", ("ok", "", 0)))
+    popen = system.subprocess.Popen
+    system.subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran with admin rights"))
+    try:
+        system.uninstall("win32", "WaveBrowser")  # 1.2 reports stored the bare key name
+    finally:
+        system.subprocess.Popen = popen
+    cmd = [c for c in PS_LOG if "Register-ScheduledTask" in c][-1]
+    assert "-RunLevel Limited" in cmd and "Highest" not in cmd, cmd
+    assert "uninstall.exe" in cmd and "Unregister-ScheduledTask" in cmd
+
+
+@test
+def same_key_name_in_hkcu_cannot_stand_in_for_machine_program():
+    reg_put("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Shared", "DisplayName", "Real App", 1)
+    reg_put("HKLM", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Shared", "UninstallString", "real.exe", 1)
+    reg_put("HKCU", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Shared", "DisplayName", "Fake App", 1)
+    reg_put("HKCU", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Shared", "UninstallString", "evil.exe", 1)
+    ids = {p["name"]: p["id"] for p in system.installed_programs()}
+    assert ids["Real App"] == "Shared" and ids["Fake App"] == "HKCU\\Shared"
+
+
+@test
+def windows_tools_run_by_full_path():
+    seen = []
+    real = util.subprocess.run
+    util.subprocess.run = lambda args, **kw: seen.append(args) or subprocess.CompletedProcess(args, 0, "", "")
+    try:
+        util.run(["icacls", "x"]); util.run(["cipher", "/w:C:\\"]); util.ps("Get-Date")
+    finally:
+        util.subprocess.run = real
+    assert seen[0][0] == os.path.join(util.SYSTEM32, "icacls.exe") and seen[1][0].endswith("cipher.exe")
+    assert seen[2][0] == util.POWERSHELL and os.path.dirname(seen[2][0])
+    assert util.sys_exe("C:\\x\\wireguard.exe") == "C:\\x\\wireguard.exe"
+
+
+@test
+def wireguard_only_from_program_files():
+    assert vpn.WG_EXE_CANDIDATES == [os.path.join(util.PROGRAM_FILES, "WireGuard", "wireguard.exe")]
+    assert vpn.wireguard_exe() is None  # no PATH lookup fallback
+
+
+@test
+def vpn_import_strips_scripts_and_locks_key():
+    d = tempfile.mkdtemp()
+    src = os.path.join(d, "proton US#1.conf")
+    open(src, "w").write("[Interface]\nPrivateKey = abc\nPostUp = calc.exe\nPreUp=whoami\n[Peer]\nEndpoint = 1.2.3.4:51820\n")
+    RUN_RULES.append(("icacls", (0, "")))
+    seen = []
+    real = vpn.run
+    vpn.run = lambda cmd, **kw: seen.append(cmd) or (0, "")
+    try:
+        r = vpn.import_config(src)
+    finally:
+        vpn.run = real
+    text = open(os.path.join(util.VPN_DIR, r["name"] + ".conf")).read()
+    assert "PostUp" not in text and "PreUp" not in text and "PrivateKey" in text and "Endpoint" in text
+    assert seen and "*S-1-5-18:F" in seen[0] and "*S-1-5-32-544:F" in seen[0] and not any("USERNAME" in str(x) for x in seen[0])
+    os.remove(os.path.join(util.VPN_DIR, r["name"] + ".conf"))
+    shutil.rmtree(d)
+
+
+@test
+def trusted_publisher_needs_whole_name():
+    assert trust.is_trusted("Riot Games, Inc.", "Valid")
+    assert trust.is_trusted("Intel(R) Corporation", "Valid") and trust.is_trusted("Microsoft Windows", "Valid")
+    assert not trust.is_trusted("Intelligent Tools Ltd", "Valid")
+    assert not trust.is_trusted("Valveworks LLC", "Valid")
+    assert not trust.is_trusted("Riot Games, Inc.", "NotSigned")
+
+
+def _frozen(exe):
+    real = (getattr(sys, "frozen", None), sys.executable)
+    sys.frozen, sys.executable = True, exe
+    return real
+
+
+def _unfreeze(real):
+    if real[0] is None:
+        del sys.frozen
+    else:
+        sys.frozen = real[0]
+    sys.executable = real[1]
+
+
+@test
+def tasks_run_protected_copy_not_downloads():
+    d = tempfile.mkdtemp()
+    dl = os.path.join(d, "Downloads", "PCShield.exe"); os.makedirs(os.path.dirname(dl)); open(dl, "wb").write(b"v13")
+    real_dir, real_exe = install.INSTALL_DIR, install.INSTALL_EXE
+    install.INSTALL_DIR = os.path.join(d, "Program Files", "PC Shield"); install.INSTALL_EXE = os.path.join(install.INSTALL_DIR, "PCShield.exe")
+    fr = _frozen(dl)
+    try:
+        PS_RULES.append(("Register-ScheduledTask", ("ok", "", 0)))
+        assert autostart.set_enabled(True)["ok"]
+        cmd = [c for c in PS_LOG if "Register-ScheduledTask" in c][-1]
+        assert util.ps_quote(install.INSTALL_EXE) in cmd and dl not in cmd, cmd
+        assert open(install.INSTALL_EXE, "rb").read() == b"v13"
+        assert "WindowsIdentity]::GetCurrent().Name" in cmd and "$env:USERNAME" not in cmd
+        themes.register_launcher()
+        assert util.ps_quote(install.INSTALL_EXE) in [c for c in PS_LOG if "PC Shield Launcher" in c and "Register" in c][-1]
+        scanner.set_schedule("quick", True, "daily", "SUN", "12:30")
+        assert util.ps_quote(install.INSTALL_EXE) in [c for c in PS_LOG if "Quick Scan" in c and "Register" in c][-1]
+    finally:
+        _unfreeze(fr)
+        install.INSTALL_DIR, install.INSTALL_EXE = real_dir, real_exe
+        shutil.rmtree(d)
+
+
+@test
+def old_tasks_moved_to_protected_copy():
+    d = tempfile.mkdtemp()
+    dl = os.path.join(d, "PCShield.exe"); open(dl, "wb").write(b"x")
+    real_dir, real_exe = install.INSTALL_DIR, install.INSTALL_EXE
+    install.INSTALL_DIR = os.path.join(d, "pf"); install.INSTALL_EXE = os.path.join(install.INSTALL_DIR, "PCShield.exe")
+    fr = _frozen(dl)
+    try:
+        PS_RULES.append(("Set-ScheduledTask", ("PC Shield\nPC Shield Launcher\n", "", 0)))
+        PS_RULES.append(("Get-ScheduledTask", ("PC Shield\n", "", 0)))
+        assert install.retarget_tasks() == ["PC Shield", "PC Shield Launcher"]
+        assert os.path.isfile(install.INSTALL_EXE)
+        PS_RULES.clear(); PS_LOG.clear()
+        assert install.retarget_tasks() == [] and not any("Set-ScheduledTask" in c for c in PS_LOG)  # nothing stale
+    finally:
+        _unfreeze(fr)
+        install.INSTALL_DIR, install.INSTALL_EXE = real_dir, real_exe
+        shutil.rmtree(d)
+
+
+@test
+def old_data_moved_and_keys_removed():
+    old = util.OLD_DATA_DIR
+    for sub in ("reports", "vpn"):
+        os.makedirs(os.path.join(old, sub), exist_ok=True)
+    open(os.path.join(old, "settings.json"), "w").write('{"theme": "james"}')
+    open(os.path.join(old, "reports", "r9.json"), "w").write("{}")
+    open(os.path.join(old, "vpn", "home.conf"), "w").write("[Interface]\nPrivateKey=k\n[Peer]\n")
+    open(os.path.join(old, "vpn", "notes.txt"), "w").write("ignored")
+    os.symlink("/etc/hostname", os.path.join(old, "reports", "link.json"))
+    for f in (util.SETTINGS_FILE, os.path.join(util.REPORT_DIR, "r9.json"), os.path.join(util.VPN_DIR, "home.conf")):
+        if os.path.exists(f):
+            os.remove(f)
+    util.save_setting("migrated_from_localappdata", False)
+    os.remove(util.SETTINGS_FILE)
+    install.migrate_old_data()
+    assert util.load_settings().get("theme") == "james" and util.load_settings().get("migrated_from_localappdata")
+    assert os.path.isfile(os.path.join(util.REPORT_DIR, "r9.json")) and os.path.isfile(os.path.join(util.VPN_DIR, "home.conf"))
+    assert not os.path.exists(os.path.join(util.REPORT_DIR, "link.json")) and not os.path.exists(os.path.join(util.VPN_DIR, "notes.txt"))
+    assert not os.path.exists(os.path.join(old, "vpn", "home.conf")), "private key left in the per-user folder"
+    assert install.migrate_old_data() == 0  # only once
+    shutil.rmtree(old)
+
+
+@test
+def version_compare():
+    assert updater.newer("1.10.0", "1.9.9") and updater.newer("v2.0", "1.3.0")
+    assert not updater.newer("1.3.0", "1.3.0") and not updater.newer("1.2.9", "1.3.0") and not updater.newer("junk", "1.3.0")
+
+
+def _release(tag="v1.4.0", digest="sha256:" + "ab" * 32, url=None, size=5):
+    return {"tag_name": tag, "name": "PC Shield " + tag, "body": "notes", "html_url": "https://github.com/Ynzie/PCShield/releases/tag/" + tag,
+            "assets": [{"name": "PCShield.exe", "size": size, "digest": digest,
+                        "browser_download_url": url or f"https://github.com/Ynzie/PCShield/releases/download/{tag}/PCShield.exe"}]}
+
+
+@test
+def update_check_and_asset_rules():
+    real = updater._get_json
+    try:
+        updater._get_json = lambda url, timeout=15: (404, {})
+        r = updater.check(force=True)
+        assert r["ok"] and not r["available"] and "No releases" in r["message"]
+        updater._get_json = lambda url, timeout=15: (200, _release())
+        r = updater.check(force=True)
+        assert r["available"] and r["latest"] == "1.4.0" and not r["can_install"]  # not frozen -> source install
+        calls = []
+        updater._get_json = lambda url, timeout=15: calls.append(url) or (200, _release("v9.9.9"))
+        assert updater.check()["latest"] == "1.4.0" and not calls  # cached for a day
+    finally:
+        updater._get_json = real
+    assert updater._asset_ok("https://github.com/Ynzie/PCShield/releases/download/v1.4.0/PCShield.exe")
+    for bad in ("http://github.com/Ynzie/PCShield/releases/download/v1/PCShield.exe",
+                "https://github.com/evil/PCShield/releases/download/v1/PCShield.exe",
+                "https://github.com.evil.io/Ynzie/PCShield/releases/download/v1/PCShield.exe",
+                "https://github.com/Ynzie/PCShield/releases/download/v1/Other.exe"):
+        assert not updater._asset_ok(bad), bad
+    assert updater.parse_release(_release(digest="md5:abc"))["sha256"] == ""
+
+
+def _run_install(data, payload):
+    d = tempfile.mkdtemp()
+    exe = os.path.join(d, "PCShield.exe"); open(exe, "wb").write(b"old")
+    fr = _frozen(exe)
+    real = (updater._get_json, updater._download, install.INSTALL_EXE)
+    install.INSTALL_EXE = os.path.join(d, "nope", "PCShield.exe")
+    restarted = []
+
+    def fake_download(url, dest, size):
+        open(dest, "wb").write(payload)
+        import hashlib
+        return hashlib.sha256(payload).hexdigest()
+    updater._get_json = lambda url, timeout=15: (200, data)
+    updater._download = fake_download
+    try:
+        updater.start_install(on_done=restarted.append)
+        for _ in range(100):
+            if not updater.state()["running"]:
+                break
+            time.sleep(0.05)
+        return updater.state(), open(exe, "rb").read(), restarted
+    finally:
+        _unfreeze(fr)
+        updater._get_json, updater._download, install.INSTALL_EXE = real
+        shutil.rmtree(d)
+
+
+@test
+def update_installs_only_matching_checksum():
+    import hashlib
+    good = b"new build"
+    st, body, restarted = _run_install(_release(digest="sha256:" + hashlib.sha256(good).hexdigest(), size=len(good)), good)
+    assert not st["error"] and st["finished"] and body == good and restarted, st
+    st, body, restarted = _run_install(_release(digest="sha256:" + "00" * 32), b"tampered")
+    assert "checksum" in st["error"] and body == b"old" and not restarted, st
+    st, body, restarted = _run_install(_release(digest=""), good)
+    assert "checksum" in st["error"] and body == b"old", st
+    st, body, _ = _run_install(_release(url="https://example.com/PCShield.exe"), good)
+    assert "no PCShield.exe" in st["error"] and body == b"old", st
+
+
+@test
+def replace_running_exe_by_renaming():
+    d = tempfile.mkdtemp()
+    src, dst = os.path.join(d, "new.exe"), os.path.join(d, "PCShield.exe")
+    open(src, "wb").write(b"2"); open(dst, "wb").write(b"1")
+    real = install.os.replace
+    calls = []
+
+    def locked(a, b):  # the first replace onto the running exe fails like on Windows
+        calls.append((a, b))
+        if b == dst and a.endswith(".new") and len(calls) == 1:
+            raise PermissionError("in use")
+        return real(a, b)
+    install.os.replace = locked
+    try:
+        install.replace_file(src, dst)
+    finally:
+        install.os.replace = real
+    assert open(dst, "rb").read() == b"2" and any(n.endswith(".old") for n in os.listdir(d))
+    shutil.rmtree(d)
 
 for status, name, tb in RESULTS:
     print(f"{status}  {name}")

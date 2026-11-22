@@ -114,7 +114,7 @@ os.environ.setdefault("SystemRoot", r"C:\Windows")
 os.environ.setdefault("USERPROFILE", r"C:\Users\ynzer")
 os.environ.setdefault("ProgramFiles", r"C:\Program Files")
 os.environ.setdefault("ProgramFiles(x86)", r"C:\Program Files (x86)")
-os.environ.setdefault("ProgramData", r"C:\ProgramData")
+os.environ["ProgramData"] = os.path.join(_TMP, "programdata")  # data folder (util.DATA_DIR) goes here in tests
 os.environ.setdefault("PUBLIC", r"C:\Users\Public")
 os.environ.setdefault("APPDATA", r"C:\Users\ynzer\AppData\Roaming")
 os.environ["TEMP"] = os.path.join(_TMP, "temp")

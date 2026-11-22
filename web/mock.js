@@ -23,7 +23,15 @@ if (new URLSearchParams(location.search).has('mock')) {
       {id: 'websearch', group: 'Windows privacy', title: 'Keep Start and taskbar search off the web (no Bing)', desc: "Searching for a file won't send what you type to Bing.", allowed: true}];
   let scanning = false, scanStart = 0;
   window.MOCK = {
-    info: () => wait({admin: true}),
+    info: () => wait({admin: true, version: '1.3.0'}),
+    update_status: () => wait(Q.has('upd') ? {ok: true, current: '1.3.0', latest: '1.4.0', available: true, can_install: true, auto: true, checked: '2026-11-22T05:30:00', message: 'Version 1.4.0 is available.', notes: '## What\'s new\n- Faster quick scans\n- <b>not bold</b>', page: 'https://github.com/Ynzie/PCShield/releases/tag/v1.4.0', size: 31457280, install: {path: 'C:\\Program Files\\PC Shield\\PCShield.exe', installed: true}}
+      : {ok: true, current: '1.3.0', available: false, auto: true, checked: null, install: {path: 'C:\\Program Files\\PC Shield\\PCShield.exe', installed: false}}),
+    check_updates: () => wait(Q.has('upd') ? {ok: true, current: '1.3.0', latest: '1.4.0', available: true, can_install: true, auto: true, checked: '2026-11-22T05:31:00', message: 'Version 1.4.0 is available.', notes: '- Faster quick scans', page: 'https://github.com/Ynzie/PCShield/releases/tag/v1.4.0', size: 31457280}
+      : {ok: true, current: '1.3.0', latest: '1.3.0', available: false, auto: true, checked: '2026-11-22T05:31:00', message: "You're on the latest version."}, 600),
+    set_update_auto: on => wait({ok: true, auto: on}),
+    install_update: () => { window.__upd = Date.now(); return wait({ok: true}); },
+    update_state: () => { const t = (Date.now() - (window.__upd || 0)) / 1000;
+      return wait(t < 2 ? {running: true, stage: 'Downloading 1.4.0', done: t * 15e6, total: 31457280} : {running: false, finished: true, stage: 'Updated to 1.4.0 - restarting', done: 31457280, total: 31457280}, 50); },
     dashboard: () => wait({protection: {products: [{name: 'Windows Defender', active: true}], mode: 'Normal', realtime: true, tamper: true, av_enabled: true,
       defs_updated: '2026-11-18 03:12', defs_version: '1.421.122.0', active_threats: 1, others: []},
       last_scan: report, scan: {running: scanning}, vpn: {tunnels: [{name: 'proton-US-FREE-12', type: 'wireguard'}], connected: null, default: 'proton-US-FREE-12'},

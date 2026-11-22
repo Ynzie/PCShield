@@ -9,12 +9,58 @@ from datetime import datetime, timedelta, timezone
 
 CREATE_NO_WINDOW = 0x08000000
 
-DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "PCShield")
+
+def _known_folder(guid, env, default):
+    """Folder path from Windows' registry (SHGetKnownFolderPath), NOT from environment variables.
+    PC Shield runs as admin, and any program running as the user can set its own %ProgramFiles%,
+    %ProgramData% or %SystemRoot%, so trusting those would let it redirect what we run or write."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            import uuid
+            from ctypes import wintypes
+
+            class GUID(ctypes.Structure):
+                _fields_ = [("D1", wintypes.DWORD), ("D2", wintypes.WORD), ("D3", wintypes.WORD), ("D4", ctypes.c_ubyte * 8)]
+            u = uuid.UUID(guid)
+            g = GUID(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+            out = ctypes.c_wchar_p()
+            shell32 = ctypes.WinDLL("shell32")
+            shell32.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE,
+                                                     ctypes.POINTER(ctypes.c_wchar_p)]
+            if shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0 and out.value:
+                path = out.value
+                ctypes.windll.ole32.CoTaskMemFree(out)
+                return path
+        except Exception:
+            pass
+    return os.environ.get(env) or default
+
+
+PROGRAM_DATA = _known_folder("62AB5D82-FDC1-4DC3-A9DD-070D1D495D97", "ProgramData", r"C:\ProgramData")
+PROGRAM_FILES = _known_folder("905e63b6-c1bf-494e-b29c-65b732d3d21a", "ProgramFiles", r"C:\Program Files")
+WINDOWS_DIR = _known_folder("F38BF404-1D43-42F2-9305-67DE0B28FC23", "SystemRoot", r"C:\Windows")
+SYSTEM32 = os.path.join(WINDOWS_DIR, "System32")
+POWERSHELL = os.path.join(SYSTEM32, "WindowsPowerShell", "v1.0", "powershell.exe")
+
+# Everything PC Shield acts on with admin rights (reports, settings, VPN configs) lives in a folder only
+# admins can change - see install.secure_data_dir(). Versions before 1.3 used the per-user folder below.
+DATA_DIR = os.path.join(PROGRAM_DATA, "PCShield")
+OLD_DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "PCShield")
 REPORT_DIR = os.path.join(DATA_DIR, "reports")
 VPN_DIR = os.path.join(DATA_DIR, "vpn")
 SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
-for _d in (DATA_DIR, REPORT_DIR, VPN_DIR):
-    os.makedirs(_d, exist_ok=True)
+
+
+def make_dirs():
+    for d in (DATA_DIR, REPORT_DIR, VPN_DIR):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass  # not admin yet (the elevated copy creates them)
+
+
+make_dirs()
 
 LOG_FILE = os.path.join(DATA_DIR, "pcshield.log")
 _settings_lock = threading.Lock()
@@ -38,7 +84,7 @@ def ps(command, timeout=600):
     """Run PowerShell. Never raises on a hang/timeout - returns (stdout, stderr, exit code) instead."""
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + command],
             capture_output=True, text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW,
             encoding="utf-8", errors="replace",
@@ -65,9 +111,19 @@ def ps_json(command, timeout=600):
     return data if isinstance(data, list) else [data]
 
 
-def run(cmd, timeout=120, shell=False):
+def sys_exe(name):
+    """Full path of a Windows tool. A bare name would make Windows look in PC Shield's own folder first
+    (often Downloads), where any program could drop a fake icacls.exe / cipher.exe to run as admin."""
+    if "\\" in name or "/" in name:
+        return name
+    return os.path.join(SYSTEM32, name if name.lower().endswith(".exe") else name + ".exe")
+
+
+def run(cmd, timeout=120):
+    if isinstance(cmd, (list, tuple)) and cmd:
+        cmd = [sys_exe(cmd[0])] + list(cmd[1:])
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, shell=shell,
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            creationflags=CREATE_NO_WINDOW, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return 124, f"Timed out after {timeout} s"

@@ -27,6 +27,8 @@ async def main():
         pg.on("console", lambda m: errs.append("console: " + m.text) if m.type == "error" and "fonts.g" not in m.text and "404" not in m.text else None)
 
         # --- first launch: welcome theme picker; Done must save a theme
+        reqs = []
+        pg.on('request', lambda r: reqs.append(r.url))
         await pg.goto(BASE); await pg.wait_for_timeout(1300)
         check("welcome shows on first launch", await pg.is_visible("#modal.show"))
         await pg.click("#modal .acts .btn"); await pg.wait_for_timeout(400)
@@ -119,6 +121,21 @@ async def main():
         await pg.click("[data-th=dnarte]"); await pg.wait_for_timeout(400)
         check("theme switches", await pg.evaluate("document.documentElement.dataset.theme") == "dnarte")
         await pg.click("#trAdd"); await pg.wait_for_timeout(300)
+        check("settings shows version, no update", "1.3.0" in await pg.inner_text("#upMsg") and not await pg.is_visible("#upGo"))
+        check("protected copy path shown", "Program Files" in await pg.inner_text("#setBody"))
+        await pg.click("#upCheck"); await pg.wait_for_timeout(900)
+        check("check now -> latest", "latest version" in await pg.inner_text("#upMsg"))
+        check("no fonts from Google", not any("googleapis" in u or "gstatic" in u for u in reqs), str([u for u in reqs if "google" in u][:3]))
+
+        # --- update available: top badge, notes escaped, install flow
+        await pg.goto(BASE + "&theme=kara&upd"); await pg.wait_for_timeout(1200)
+        check("top bar shows update", await pg.is_visible("#topUpdate") and "1.4.0" in await pg.inner_text("#topUpdate"))
+        await pg.click("#topUpdate"); await pg.wait_for_timeout(900)
+        check("update button + notes", await pg.is_visible("#upGo") and "Faster quick scans" in await pg.inner_text("#upMore"))
+        check("release notes are escaped", await pg.locator("#upMore b:has-text('not bold')").count() == 0)
+        await pg.click("#upGo"); await pg.wait_for_timeout(300)
+        await pg.click("#modalBox .btn.go"); await pg.wait_for_timeout(3200)
+        check("update finishes", "restarting" in (await pg.inner_text("#upMsg")).lower(), await pg.inner_text("#upMsg"))
 
         check("no JavaScript errors", not errs, "\n".join(errs[:10]))
         await b.close()

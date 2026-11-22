@@ -816,7 +816,7 @@ function wireThemeGrid(root) {
 // ------------------------------------------------------------------ settings
 async function buildSettings(el) {
   el.innerHTML = loading('Loading settings');
-  const [a, th, sc, cm] = await Promise.all([api.autostart_status(), api.get_theme(), api.shortcuts(), api.close_mode()]);
+  const [a, th, sc, cm, up] = await Promise.all([api.autostart_status(), api.get_theme(), api.shortcuts(), api.close_mode(), api.update_status()]);
   if (!el.isConnected) return;  // user switched tabs while this was loading
   if (!a || a.error || !th || th.error) { el.innerHTML = '<div class="empty">Couldn\'t load settings.</div>'; return; }
   const added = sc && (sc.desktop || sc.start);
@@ -824,6 +824,12 @@ async function buildSettings(el) {
     <div class="lbl" style="margin-top:4px">Theme</div>
     ${themeGrid(th.themes)}
     <p class="muted small">Changes the colors, the app logo, the taskbar and tray icon, and the PC Shield shortcuts.</p>
+    <div class="sep"></div>
+    <div class="trow"><div class="tx"><b>Updates</b><span id="upMsg"></span></div>
+      <div class="btnrow" style="margin:0;flex-wrap:nowrap"><button class="btn sm" id="upCheck">Check now</button><button class="btn sm go" id="upGo" style="display:none">Update</button></div></div>
+    <div id="upMore"></div>
+    <div class="trow"><div class="tx"><b>Check for updates automatically</b>
+      <span>Once a day PC Shield asks GitHub for the newest release and tells you in the tray. Nothing installs until you click Update.</span></div>${sw(up && !up.error ? up.auto !== false : true, 'id="upAuto"')}</div>
     <div class="sep"></div>
     <div class="trow"><div class="tx"><b>No-prompt shortcut (Desktop & Start menu)</b>
       <span>${added ? 'Added - opens PC Shield without the admin prompt, icon follows the theme.' : 'Adds a "PC Shield" shortcut that opens without the admin prompt and uses the theme icon.'}</span></div>
@@ -841,8 +847,9 @@ async function buildSettings(el) {
     <div class="chips" id="trList" style="margin-bottom:10px"></div>
     <div class="btnrow"><input type="text" id="trNew" placeholder="Add a publisher, e.g. Riot Games" style="flex:1;max-width:340px"><button class="btn sm go" id="trAdd">Add</button></div>
     <div class="sep"></div>
-    <p class="muted small">Keep PCShield.exe in a permanent folder - shortcuts, startup and scheduled scans point to where it was when you set them up.</p>`;
+    <p class="muted small">The shortcut, start with Windows and scheduled scans run a protected copy in <b>${esc((up && up.install && up.install.path) || 'Program Files\\PC Shield')}</b> that only admins can change, so you can move or delete the downloaded exe.</p>`;
   wireThemeGrid(el);
+  wireUpdates(el, up);
   const drawTrust = list => {
     el.querySelector('#trList').innerHTML = list.map(p => `<span class="tag" style="text-transform:none;letter-spacing:0;font-size:12px;padding:4px 8px">${esc(p)} <a data-tr="${esc(p)}" style="margin-left:4px">✕</a></span>`).join('');
     el.querySelectorAll('[data-tr]').forEach(x => x.onclick = async () => { const r = await api.trust_remove(x.dataset.tr); if (r && r.ok) drawTrust(r.list); });
@@ -861,13 +868,61 @@ async function buildSettings(el) {
   };
 }
 
+function drawUpdate(el, r) {
+  const msg = el.querySelector('#upMsg'), btn = el.querySelector('#upGo'), more = el.querySelector('#upMore');
+  if (!msg) return;
+  if (!r || r.error) { msg.textContent = (r && r.error) || "Couldn't check for updates."; return; }
+  msg.textContent = [`You have version ${r.current || '?'}`, r.checked ? 'checked ' + fmtDate(r.checked) : 'not checked yet', r.message].filter(Boolean).join(' · ');
+  btn.style.display = r.available && r.can_install ? '' : 'none';
+  btn.textContent = r.available ? `Update to ${r.latest}` : 'Update';
+  more.innerHTML = r.available ? `<div class="flag good"><span class="ic">⬆</span><div style="flex:1"><b>${esc(r.name || 'Version ' + r.latest)}${r.size ? ' · ' + human(r.size) : ''}</b>
+      ${r.notes ? `<span style="white-space:pre-wrap;display:block;max-height:180px;overflow:auto">${esc(r.notes.replace(/^#+\s*/gm, '').replace(/\*\*/g, '').trim())}</span>` : ''}
+      <a id="upPage">See it on GitHub →</a></div></div>` : '';
+  const pg = more.querySelector('#upPage'); if (pg) pg.onclick = () => api.open_url(r.page);
+  topUpdate(r);
+}
+
+function topUpdate(r) {
+  const c = $('#topUpdate');
+  if (c) { c.style.display = r && r.available ? '' : 'none'; c.textContent = r && r.available ? `⬆ Update ${r.latest}` : ''; }
+}
+
+function wireUpdates(el, up) {
+  drawUpdate(el, up);
+  el.querySelector('#upAuto').onchange = async e => { await api.set_update_auto(e.target.checked); toast(e.target.checked ? 'Will check GitHub once a day' : 'Automatic update checks off'); };
+  el.querySelector('#upCheck').onclick = async e => {
+    e.target.disabled = true; el.querySelector('#upMsg').textContent = 'Checking GitHub…';
+    const r = await api.check_updates();
+    e.target.disabled = false;
+    if (el.isConnected) drawUpdate(el, r);
+    if (r && r.ok === false) toast(r.message, true);
+  };
+  el.querySelector('#upGo').onclick = async e => {
+    if (!await confirmBox('Update PC Shield', '<p>Download the new version from GitHub, check it matches GitHub\'s checksum, install it and restart PC Shield?</p><p class="muted small">Scans in progress will stop.</p>', 'Update')) return;
+    e.target.disabled = true; el.querySelector('#upCheck').disabled = true;
+    const r = await api.install_update();
+    if (!r || r.ok === false || r.error) { toast((r && (r.message || r.error)) || 'Update failed', true); e.target.disabled = false; el.querySelector('#upCheck').disabled = false; return; }
+    for (;;) {
+      await sleep(500);
+      const st = await api.update_state();
+      const msg = el.querySelector('#upMsg');
+      if (msg && st) msg.textContent = st.stage + (st.total && st.running ? ` · ${Math.round(st.done / st.total * 100)}%` : '');
+      if (!st || !st.running) {
+        if (st && st.error) { toast(st.error, true); e.target.disabled = false; el.querySelector('#upCheck').disabled = false; }
+        else toast('Updated - restarting PC Shield');
+        return;
+      }
+    }
+  };
+}
+
 function viewSettings(el) {
   el.innerHTML = `<div class="panel"><h2>Settings</h2><div id="setBody"></div></div>`;
   buildSettings($('#setBody'));
 }
 
 async function openWelcome() {
-  const done = modal('Welcome to PC Shield - pick a theme', '<div id="setBody"></div>', [{label: 'Done', value: true}]);
+  const done = modal('Welcome to PC Shield - pick a theme', '<div id="setBody"></div>', [{label: 'Done', cls: 'go', value: true}]);
   buildSettings($('#setBody'));
   await done;
   api.set_theme(S.theme || 'kara');  // remember the choice (or the default) so this only shows once
@@ -892,6 +947,9 @@ async function boot() {
   refreshTop();
   if (th && !th.error && !th.theme) setTimeout(openWelcome, 400);  // first launch: pick a theme
   pollScan();
+  $('#topUpdate').onclick = () => go('settings');
+  const upd = () => api.update_status().then(r => { if (r && !r.error) topUpdate(r); });
+  upd(); setTimeout(upd, 30000);  // the daily background check runs ~20 s after start
 }
 
 let booted = false;

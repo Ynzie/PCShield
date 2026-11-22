@@ -1,6 +1,7 @@
 """Installed programs, bloatware rules, startup entries, PC health, processes, Defender status."""
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -8,7 +9,7 @@ import winreg
 
 import psutil
 
-from .util import ps_json, ps_out, ps_quote, human, enum_name, MEDIA_TYPES, HEALTH, BUS_TYPES, CREATE_NO_WINDOW
+from .util import ps, ps_json, ps_out, ps_quote, sys_exe, human, enum_name, MEDIA_TYPES, HEALTH, BUS_TYPES, CREATE_NO_WINDOW
 
 # (match substring, category, level, advice)
 #   level "pup"      -> counted as a PUP by the scanner
@@ -137,8 +138,10 @@ def installed_programs():
                         continue
                     seen.add(name.lower())
                     size = _val(sub, "EstimatedSize", 0)
+                    per_user = hive == winreg.HKEY_CURRENT_USER
                     progs.append({
-                        "id": keyname, "name": name, "publisher": _val(sub, "Publisher") or "",
+                        # per-user ids are prefixed so a same-named key can't stand in for a machine-wide program
+                        "id": ("HKCU\\" + keyname) if per_user else keyname, "per_user": per_user, "name": name, "publisher": _val(sub, "Publisher") or "",
                         "version": str(_val(sub, "DisplayVersion") or ""), "installed": str(_val(sub, "InstallDate") or ""),
                         "size": size * 1024 if isinstance(size, int) else 0,
                         "uninstall": _val(sub, "UninstallString") or "",
@@ -185,22 +188,47 @@ def uninstall(kind, ident, wait_minutes=20):
                      f"catch {{ 'ERR: ' + $_.Exception.Message }}")
         ok = out.strip().endswith("ok") and "ERR:" not in out
         return {"ok": ok, "message": "Removed." if ok else out.replace("ERR: ", "").strip() or "Couldn't remove it."}
-    prog = next((p for p in installed_programs() if p["id"] == ident), None)
+    progs = installed_programs()
+    prog = next((p for p in progs if p["id"] == ident), None)
+    if prog is None and not str(ident).startswith("HKCU\\"):  # reports saved by 1.2 used bare key names
+        prog = next((p for p in progs if p["id"] == "HKCU\\" + str(ident)), None)
     if not prog or not prog["uninstall"]:
         return {"ok": False, "message": "No uninstaller registered for this program."}
     cmd = prog["uninstall"]
     if "msiexec" in cmd.lower():
         cmd = re.sub(r"(?i)/I\s*(\{)", r"/X\1", cmd)  # '/I{GUID}' or '/I {GUID}' opens repair - /X uninstalls
-    proc = subprocess.Popen(cmd, shell=True, creationflags=CREATE_NO_WINDOW)  # no stray black console window
-    try:
-        # wait (up to a limit) so several uninstallers don't run at once - Windows Installer only allows one
-        proc.wait(timeout=wait_minutes * 60)
-    except subprocess.TimeoutExpired:
-        pass
-    still = any(p["id"] == ident for p in installed_programs())
+    # wait (up to a limit) so several uninstallers don't run at once - Windows Installer only allows one
+    if prog.get("per_user"):
+        run_as_user(cmd, wait_minutes)
+    else:
+        # cmd.exe by full path (shell=True would use %COMSPEC%, which a program could point elsewhere)
+        proc = subprocess.Popen(f'"{sys_exe("cmd")}" /d /s /c "{cmd}"', creationflags=CREATE_NO_WINDOW)
+        try:
+            proc.wait(timeout=wait_minutes * 60)
+        except subprocess.TimeoutExpired:
+            pass
+    still = any(p["id"] == prog["id"] for p in installed_programs())
     return {"ok": True, "removed": not still,
             "message": f"{prog['name']} removed." if not still else
                        f"Opened the uninstaller for {prog['name']} - finish its prompts if it's still open."}
+
+
+def run_as_user(cmd, wait_minutes=20):
+    """Run a per-user program's uninstaller the way Windows does: as the signed-in user, without admin.
+    Its uninstall entry is in the user's registry, which any program the user runs can write - running it
+    with PC Shield's admin rights would hand that program admin. (It can still ask for admin itself.)"""
+    task = ps_quote(f"PC Shield Uninstall {secrets.token_hex(4)}")
+    script = (
+        "$u=[Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+        f"$a=New-ScheduledTaskAction -Execute {ps_quote(sys_exe('cmd'))} -Argument {ps_quote('/d /s /c "' + cmd + '"')}; "
+        "$p=New-ScheduledTaskPrincipal -UserId $u -LogonType Interactive -RunLevel Limited; "
+        "$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2); "
+        f"Register-ScheduledTask -TaskName {task} -Action $a -Principal $p -Settings $s -Force | Out-Null; "
+        f"Start-ScheduledTask -TaskName {task}; Start-Sleep -Milliseconds 800; $end=(Get-Date).AddMinutes({int(wait_minutes)}); "
+        f"while ((Get-ScheduledTask -TaskName {task}).State -in 'Running','Queued' -and (Get-Date) -lt $end) {{ Start-Sleep 1 }}; "
+        f"Unregister-ScheduledTask -TaskName {task} -Confirm:$false; 'ok'")
+    out, err, _ = ps(script, timeout=int(wait_minutes) * 60 + 120)
+    return out.strip().endswith("ok")
 
 
 # ------------------------------------------------------------------ startup

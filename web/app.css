@@ -1,3 +1,11 @@
+/* Fonts ship with the app (SIL Open Font License, see fonts/) - no request to Google on every launch */
+@font-face{font-family:'Inter';font-style:normal;font-weight:400;font-display:swap;src:url(fonts/inter-latin-400-normal.woff2) format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:500;font-display:swap;src:url(fonts/inter-latin-500-normal.woff2) format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:700;font-display:swap;src:url(fonts/inter-latin-700-normal.woff2) format('woff2')}
+@font-face{font-family:'Inter';font-style:normal;font-weight:800;font-display:swap;src:url(fonts/inter-latin-800-normal.woff2) format('woff2')}
+@font-face{font-family:'Orbitron';font-style:normal;font-weight:600;font-display:swap;src:url(fonts/orbitron-latin-600-normal.woff2) format('woff2')}
+@font-face{font-family:'Orbitron';font-style:normal;font-weight:800;font-display:swap;src:url(fonts/orbitron-latin-800-normal.woff2) format('woff2')}
+@font-face{font-family:'Orbitron';font-style:normal;font-weight:900;font-display:swap;src:url(fonts/orbitron-latin-900-normal.woff2) format('woff2')}
 /* PC Shield - styled to match SKT GOLD */
 :root{
   /* theme inputs (Kara = default) */
@@ -188,7 +196,8 @@ input[type=checkbox]{accent-color:rgb(var(--good-rgb));width:16px;height:16px;cu
 /* modal + toast */
 #modal{position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);display:none;place-items:center;z-index:50}
 #modal.show{display:grid}
-#modal .box{background:var(--surface2);border:1px solid var(--border2);border-radius:22px;padding:24px;max-width:560px;width:calc(100% - 40px);box-shadow:0 30px 80px rgba(0,0,0,.8);animation:slideUp .35s}
+#modal .box{background:var(--surface2);border:1px solid var(--border2);border-radius:22px;padding:24px;max-width:560px;width:calc(100% - 40px);box-shadow:0 30px 80px rgba(0,0,0,.8);animation:slideUp .35s;max-height:calc(100vh - 40px);display:flex;flex-direction:column}
+#modal .box>div:not(.acts){overflow:auto;min-height:0}  /* long content scrolls, the buttons stay on screen */
 #modal .box h3{font-size:16px}
 #modal .acts{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 #toasts{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;align-items:center;z-index:99}
